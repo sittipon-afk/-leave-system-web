@@ -1,53 +1,61 @@
-// ตั้งค่า Worker ของ PDF.js ให้ชี้ไปที่ CDN
+// ตั้งค่า PDF.js Worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const pdfUploader = document.getElementById('pdfUploader');
+const uploader = document.getElementById('uploader');
 const statusDiv = document.getElementById('status');
-const progressBar = document.getElementById('progressBar');
-const progressFill = document.getElementById('progressFill');
 const previewContainer = document.getElementById('preview-container');
 const downloadBtn = document.getElementById('downloadBtn');
 const tableBody = document.querySelector('#resultTable tbody');
 
 let extractedData = [];
 
-pdfUploader.addEventListener('change', async (e) => {
+uploader.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file || file.type !== 'application/pdf') {
-        alert('กรุณาเลือกไฟล์ PDF เท่านั้น');
+        statusDiv.innerHTML = '<span class="error">กรุณาเลือกไฟล์ PDF เท่านั้น</span>';
         return;
     }
 
-    // Reset UI
-    previewContainer.innerHTML = '';
+    // รีเซ็ตค่า
     tableBody.innerHTML = '';
     extractedData = [];
+    previewContainer.innerHTML = '';
     downloadBtn.disabled = true;
-    progressBar.style.display = 'block';
-    progressFill.style.width = '0%';
-    
+    statusDiv.innerText = 'กำลังอ่านไฟล์ PDF...';
+
     try {
-        statusDiv.innerText = 'กำลังอ่านไฟล์ PDF...';
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
         const totalPages = pdf.numPages;
         
-        statusDiv.innerText = `พบ ${totalPages} หน้า กำลังแปลงเป็นรูปภาพเพื่อทำ OCR...`;
-        
-        let allText = "";
+        statusDiv.innerText = `พบ ${totalPages} หน้า กำลังเริ่ม OCR (อาจใช้เวลาสักครู่)...`;
+
+        // สร้าง Tesseract Worker และโหลดภาษา ไทย + อังกฤษ
+        // ใช้ CDN ที่เสถียรสำหรับ GitHub Pages
+        const worker = await Tesseract.createWorker({
+            logger: m => {
+                if(m.status === 'recognizing text') {
+                    statusDiv.innerText = `กำลังประมวลผลหน้า ${m.currentPage || 1}/${totalPages}: ${Math.round(m.progress * 100)}%`;
+                }
+            },
+            // ระบุ path ของ core และ language data ชัดเจน
+            corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/dist/tesseract-core.wasm.js',
+            langPath: 'https://tessdata.projectnaptha.com/4.0.0' 
+        });
+
+        // โหลดภาษา ไทย (tha) และ อังกฤษ (eng) เพื่อความแม่นยำ
+        await worker.loadLanguage('tha+eng');
+        await worker.initialize('tha+eng');
+
+        let allTextLines = [];
 
         // วนลูปทุกหน้าใน PDF
         for (let i = 1; i <= totalPages; i++) {
-            updateProgress(i, totalPages);
-            statusDiv.innerText = `กำลังประมวลผลหน้า ${i} จาก ${totalPages}...`;
-
-            const page = await pdf.getPage(i);
+            statusDiv.innerText = `กำลังแปลงหน้า ${i}/${totalPages} เป็นรูปภาพ...`;
             
-            // ตั้งค่าความละเอียด (Scale 2.0 เพื่อความชัดสำหรับ OCR)
-            const scale = 2.0;
-            const viewport = page.getViewport({ scale });
-
-            // สร้าง Canvas เพื่อวาดรูปจาก PDF
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 2.0 }); // Scale 2.0 เพื่อความชัดของตัวอักษร
+            
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
             canvas.height = viewport.height;
@@ -55,63 +63,50 @@ pdfUploader.addEventListener('change', async (e) => {
 
             await page.render({ canvasContext: context, viewport: viewport }).promise;
 
-            // แสดงตัวอย่างรูปภาพ (Optional)
-            const imgPreview = document.createElement('div');
-            imgPreview.className = 'page-preview';
+            // แสดงตัวอย่างรูป (Optional)
             const img = document.createElement('img');
             img.src = canvas.toDataURL('image/png');
-            const label = document.createElement('div');
-            label.className = 'page-label';
-            label.innerText = `หน้า ${i}`;
-            imgPreview.appendChild(img);
-            imgPreview.appendChild(label);
-            previewContainer.appendChild(imgPreview);
+            img.className = 'page-preview';
+            img.style.display = 'block';
+            img.title = `หน้า ${i}`;
+            previewContainer.appendChild(img);
 
             // ทำ OCR กับรูปภาพนี้
-            const worker = await Tesseract.createWorker('eng+tha'); // ใช้ภาษาไทยและอังกฤษ
+            statusDiv.innerText = `กำลังอ่านข้อความหน้า ${i}/${totalPages}...`;
             const { data: { text } } = await worker.recognize(canvas);
-            await worker.terminate();
-
-            allText += text + "\n"; // รวมข้อความทุกหน้า
+            
+            const lines = text.split('\n');
+            allTextLines = allTextLines.concat(lines);
         }
 
-        statusDiv.innerText = 'OCR เสร็จสิ้น! กำลังจัดรูปแบบข้อมูล...';
-        console.log("Raw Text from PDF:\n", allText);
+        await worker.terminate();
 
+        statusDiv.innerText = 'OCR เสร็จสิ้น! กำลังจัดรูปแบบข้อมูล...';
+        
         // แยกข้อมูล (ต้องปรับ Regex ตามรูปแบบธนาคารของคุณ)
-        extractedData = parseBankStatement(allText);
+        extractedData = parseBankStatement(allTextLines);
         
         renderTable(extractedData);
-
+        
         if (extractedData.length > 0) {
             downloadBtn.disabled = false;
-            statusDiv.innerText = 'พร้อมดาวน์โหลด! (ตรวจสอบความถูกต้องในตารางด้านล่าง)';
+            statusDiv.innerText = `สำเร็จ! พบข้อมูล ${extractedData.length} รายการ`;
         } else {
-            statusDiv.innerText = 'ไม่พบข้อมูลธุรกรรม อาจเกิดจากรูปแบบไฟล์ที่ไม่ตรง หรือตัวหนังสือเบลอ';
+            statusDiv.innerHTML = '<span class="error">ไม่พบข้อมูลในรูปแบบตาราง กรุณาลองไฟล์อื่น หรือตรวจสอบรูปแบบ</span>';
         }
 
     } catch (error) {
         console.error(error);
-        statusDiv.innerText = 'เกิดข้อผิดพลาด: ' + error.message;
-        progressBar.style.display = 'none';
+        statusDiv.innerHTML = `<span class="error">เกิดข้อผิดพลาด: ${error.message}</span>`;
     }
 });
 
-function updateProgress(current, total) {
-    const percent = Math.round((current / total) * 100);
-    progressFill.style.width = `${percent}%`;
-}
-
-function parseBankStatement(text) {
+function parseBankStatement(lines) {
     const results = [];
-    const lines = text.split('\n');
+    // Regex ตัวอย่าง: หาวันที่รูปแบบ DD/MM/YYYY หรือ DD/MM/YY
+    // ปรับปรุงตามจริง: ธนาคารบางแห่งใช้ DD-MM-YYYY หรือ มีเวลาติดมาด้วย
+    const dateRegex = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/; 
     
-    // Regex ตัวอย่าง (ต้องปรับตามจริง):
-    // หาวันที่รูปแบบ DD/MM/YYYY หรือ DD/MM/YY
-    const dateRegex = /(\d{1,2}\/\d{1,2}\/\d{2,4})/;
-    // หาตัวเลขที่มีทศนิยม (จำนวนเงิน)
-    const moneyRegex = /(\d{1,3}(?:,\d{3})*\.\d{2})/g;
-
     lines.forEach(line => {
         line = line.trim();
         if (!line) return;
@@ -119,49 +114,45 @@ function parseBankStatement(text) {
         const dateMatch = line.match(dateRegex);
         
         if (dateMatch) {
-            const amounts = line.match(moneyRegex);
-            let deposit = "";
-            let withdrawal = "";
-            let balance = "";
+            // ลองแยกตัวเลขที่เป็นเงิน (ที่มีทศนิยม 2 ตำแหน่ง)
+            // รูปแบบทั่วไป: ... Description ... Amount ... Balance
+            // วิธีนี้อาจต้องปรับเยอะมากขึ้นอยู่กับ Layout ของ Bank Statement นั้นๆ
+            const numbers = line.match(/[\d,]+\.\d{2}/g);
             
-            // Logic การแยกเงินฝาก/ถอน/ยอดคงเหลือ 
-            // หมายเหตุ: ส่วนใหญ่ Bank Statement จะเรียง: วันที่ | รายการ | เงินเข้า | เงินออก | ยอดคงเหลือ
-            // แต่ OCR อาจจะดึงมาปนกัน ต้องใช้ตรรกะเพิ่มเติม เช่น ถ้ามี 3 ตัวเลข ตัวสุดท้ายมักคือยอดคงเหลือ
-            
-            if (amounts && amounts.length > 0) {
-                // สมมติว่าตัวเลขตัวสุดท้ายคือยอดคงเหลือ (Balance)
-                balance = amounts[amounts.length - 1];
+            let description = line.replace(dateMatch[0], '').trim();
+            // ลบตัวเลขออกจากคำอธิบายเบื้องต้น
+            if(numbers) {
+                numbers.forEach(num => {
+                    description = description.replace(num, '').trim();
+                });
+            }
+            // ลบเครื่องหมายวรรคตอนเกินออก
+            description = description.replace(/[-|]+/g, ' ').trim();
+
+            let deposit = '';
+            let withdrawal = '';
+            let balance = '';
+
+            if (numbers && numbers.length > 0) {
+                // สมมติว่าตัวสุดท้ายคือยอดคงเหลือ (Balance)
+                balance = numbers[numbers.length - 1];
                 
-                // ถ้ามี 2 ตัวขึ้นไป ตัวแรกอาจจะเป็นเงินถอนหรือฝาก ขึ้นอยู่กับรูปแบบธนาคาร
-                // กรณีนี้สมมติง่ายๆ ว่าถ้ามี 2 ตัว: ตัวแรก=ธุรกรรม, ตัวสอง=ยอดคงเหลือ
-                if (amounts.length >= 2) {
-                    // ตรวจสอบคำสำคัญในบรรทัดเพื่อแยกว่า ฝาก หรือ ถอน
-                    const lowerLine = line.toLowerCase();
-                    if (lowerLine.includes("transfer") || lowerLine.includes("deposit") || lowerLine.includes("จ่าย")) {
-                         // Logic นี้ต้องปรับตามคำที่ปรากฏใน statement จริง
-                         withdrawal = amounts[0]; 
-                    } else {
-                         deposit = amounts[0];
-                    }
+                // ถ้ามี 2 ตัวเลข อาจเป็น ยอดทำรายการ + ยอดคงเหลือ
+                if (numbers.length >= 2) {
+                    const transactionAmount = numbers[numbers.length - 2];
+                    // ต้องมี Logic เพิ่มว่าอันไหนฝาก อันไหนถอน (เช่น ดูคำว่า "โอนเข้า", "ATM")
+                    // เบื้องต้นใส่เป็นถอนไว้ก่อน หรือเว้นว่างให้ผู้ใช้แก้ใน Excel
+                    withdrawal = transactionAmount; 
                 }
             }
 
-            // ลบวันที่และตัวเลขออกจากข้อความเพื่อให้ได้เฉพาะ "รายการ"
-            let description = line.replace(dateMatch[0], "")
-                                  .replace(/[0-9,.]/g, " ")
-                                  .replace(/\s+/g, " ")
-                                  .trim();
-            
-            // กรองบรรทัดที่ไม่มีข้อมูลสำคัญ
-            if (description.length > 2 || amounts) {
-                results.push({
-                    "Date": dateMatch[0],
-                    "Description": description,
-                    "Deposit": deposit,
-                    "Withdrawal": withdrawal,
-                    "Balance": balance
-                });
-            }
+            results.push({
+                date: dateMatch[0],
+                description: description,
+                deposit: deposit,
+                withdrawal: withdrawal,
+                balance: balance
+            });
         }
     });
 
@@ -172,11 +163,11 @@ function renderTable(data) {
     data.forEach(row => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-            <td>${row.Date}</td>
-            <td>${row.Description}</td>
-            <td style="color:green">${row.Deposit}</td>
-            <td style="color:red">${row.Withdrawal}</td>
-            <td><b>${row.Balance}</b></td>
+            <td>${row.date}</td>
+            <td>${row.description}</td>
+            <td style="text-align:right;">${row.deposit}</td>
+            <td style="text-align:right;">${row.withdrawal}</td>
+            <td style="text-align:right;">${row.balance}</td>
         `;
         tableBody.appendChild(tr);
     });
@@ -187,7 +178,7 @@ downloadBtn.addEventListener('click', () => {
 
     const ws = XLSX.utils.json_to_sheet(extractedData);
     
-    // ปรับความกว้างคอลัมน์
+    // ตั้งค่าความกว้างคอลัมน์ให้เหมาะสม
     const wscols = [
         {wch: 15}, // Date
         {wch: 40}, // Description
@@ -200,6 +191,5 @@ downloadBtn.addEventListener('click', () => {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Bank Statement");
 
-    const fileName = `Statement_${new Date().toISOString().slice(0,10)}.xlsx`;
-    XLSX.writeFile(wb, fileName);
+    XLSX.writeFile(wb, "Bank_Statement_TH.xlsx");
 });
