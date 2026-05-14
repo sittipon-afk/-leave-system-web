@@ -1,131 +1,147 @@
-onst uploader = document.getElementById('uploader');
-const preview = document.getElementById('preview');
+const uploader = document.getElementById('uploader');
+const previewContainer = document.getElementById('preview-container');
 const statusDiv = document.getElementById('status');
 const downloadBtn = document.getElementById('downloadBtn');
 const tableBody = document.querySelector('#resultTable tbody');
 
-let extractedData = [];
+// ตั้งค่า Worker ของ PDF.js ให้ชี้ไปที่ CDN (จำเป็นสำหรับ GitHub Pages)
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-// ฟังก์ชันช่วยแสดงสถานะและ Log
-function logStatus(msg, isError = false) {
-    console.log(msg);
-    statusDiv.innerText = msg;
-    if (isError) {
-        statusDiv.style.color = 'red';
-    } else {
-        statusDiv.style.color = '#666';
-    }
-}
+let extractedData = [];
 
 uploader.addEventListener('change', async (e) => {
     const file = e.target.files[0];
-    if (!file) return;
+    if (!file || file.type !== 'application/pdf') {
+        alert('กรุณาเลือกไฟล์ PDF เท่านั้น');
+        return;
+    }
 
-    // รีเซ็ตค่า
-    preview.src = URL.createObjectURL(file);
-    preview.style.display = 'block';
+    // Reset UI
+    previewContainer.innerHTML = '';
     tableBody.innerHTML = '';
     extractedData = [];
     downloadBtn.disabled = true;
-    logStatus('กำลังโหลดโมเดล OCR (อาจใช้เวลาสักครู่)...');
+    statusDiv.innerText = 'กำลังแปลง PDF เป็นรูปภาพ...';
 
     try {
-        // สร้าง Worker โดยระบุ core path ชัดเจนเพื่อป้องกันปัญหาใน GitHub Pages
-        const worker = await Tesseract.createWorker({
-            logger: m => {
-                if(m.status === 'recognizing text') {
-                    logStatus(`กำลังอ่านข้อความ: ${Math.round(m.progress * 100)}%`);
-                }
-            },
-            // บังคับโหลดจาก CDN ที่เสถียร
-            corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
-            langPath: 'https://tesseract-data.projectnaptha.com/4.0.0' 
-        });
-
-        // ใช้ภาษาอังกฤษก่อน (ถ้าต้องการไทยต้องเปลี่ยนเป็น 'tha' และโหลดไฟล์ภาษาไทยซึ่งมีขนาดใหญ่)
-        // ใบแจ้งยอดธนาคารมักเป็นตัวเลขและอังกฤษเป็นหลัก
-        await worker.loadLanguage('eng');
-        await worker.initialize('eng');
-
-        logStatus('กำลังประมวลผลรูปภาพ...');
-        const { data: { text } } = await worker.recognize(file);
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+        const totalPages = pdf.numPages;
         
-        logStatus('ประมวลผลเสร็จสิ้น! กำลังจัดรูปแบบข้อมูล...');
-        console.log("=== Raw Text From OCR ===");
-        console.log(text); // ดูผลลัพธ์ดิบใน Console (กด F12)
-        console.log("=========================");
+        statusDiv.innerText = `พบ ${totalPages} หน้า กำลังประมวลผล...`;
 
-        const lines = text.split('\n');
-        extractedData = parseBankStatement(lines);
+        // วนลูปทุกหน้าใน PDF
+        for (let i = 1; i <= totalPages; i++) {
+            statusDiv.innerText = `กำลังอ่านหน้า ${i} จาก ${totalPages}...`;
+            
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 2.0 }); // Scale 2.0 เพื่อความชัดเจนของ OCR
 
-        if (extractedData.length === 0) {
-            logStatus('ไม่พบข้อมูลรูปแบบบัญชีธนาคาร กรุณาลองรูปที่ชัดเจนกว่านี้', true);
-        } else {
-            renderTable(extractedData);
-            downloadBtn.disabled = false;
-            logStatus('พร้อมดาวน์โหลดไฟล์ Excel');
+            // สร้าง Canvas เพื่อวาดรูปจาก PDF
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            await page.render({
+                canvasContext: context,
+                viewport: viewport
+            }).promise;
+
+            // แสดงตัวอย่างรูปภาพ (Optional)
+            const img = document.createElement('img');
+            img.src = canvas.toDataURL('image/png');
+            img.className = 'page-preview';
+            img.style.maxHeight = '200px'; // ย่อโชว์เฉพาะพอเห็น
+            previewContainer.appendChild(img);
+
+            // ทำ OCR กับรูปภาพนี้
+            const textFromPage = await runOCR(canvas);
+            const parsedData = parseBankStatement(textFromPage);
+            extractedData = [...extractedData, ...parsedData];
         }
 
-        await worker.terminate();
+        renderTable(extractedData);
+        statusDiv.innerText = 'เสร็จสิ้น! พร้อมดาวน์โหลด';
+        downloadBtn.disabled = false;
 
     } catch (error) {
         console.error(error);
-        logStatus('เกิดข้อผิดพลาด: ' + error.message, true);
-        alert("เกิดข้อผิดพลาดในการประมวลผล กรุณาเปิด Console (F12) เพื่อดูรายละเอียด");
+        statusDiv.innerText = 'เกิดข้อผิดพลาด: ' + error.message;
     }
 });
 
+async function runOCR(canvas) {
+    return new Promise((resolve, reject) => {
+        Tesseract.recognize(
+            canvas,
+            'eng', // ใช้ภาษาอังกฤษเป็นหลัก (ตัวเลขอ่านได้ดี) ถ้ามีไทยอาจต้องใส่ 'tha+eng' แต่จะช้าลง
+            {
+                logger: m => {
+                    if (m.status === 'recognizing text') {
+                        // อัปเดตสถานะย่อยถ้าต้องการ (แต่อาจจะกระพริบเร็วไป)
+                    }
+                }
+            }
+        ).then(({ data: { text } }) => {
+            resolve(text);
+        }).catch(err => {
+            reject(err);
+        });
+    });
+}
+
 function parseBankStatement(lines) {
     const results = [];
-    // ปรับ Regex ตามรูปแบบวันที่ของธนาคารคุณ (สมมติว่าเป็น DD/MM/YYYY หรือ DD/MM/YY)
-    const dateRegex = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/;
-    
+    // Regex สำหรับหาวันที่รูปแบบ DD/MM/YYYY หรือ DD-MM-YYYY
+    const dateRegex = /(\d{2}[\/\-]\d{2}[\/\-]\d{4})/;
+    // Regex สำหรับหาจำนวนเงิน (ที่มีทศนิยม 2 ตำแหน่ง)
+    const amountRegex = /(\d{1,3}(?:,\d{3})*\.\d{2})/g;
+
     lines.forEach(line => {
         line = line.trim();
         if (!line) return;
 
         const dateMatch = line.match(dateRegex);
         
-        // กรองบรรทัดที่มีวันที่เท่านั้น
+        // เงื่อนไข: ต้องมีวันที่ และมีตัวเลขที่เป็นจำนวนเงินอย่างน้อย 1 ตัว
         if (dateMatch) {
-            // พยายามดึงตัวเลขที่เป็นเงิน (รูปแบบมีลูกน้ำหรือจุด)
-            // หมายเหตุ: Logic นี้เป็นแบบกว้างๆ อาจต้องปรับตามธนาคาร
-            const numbers = line.match(/([\d,]+(?:\.\d{2})?)/g);
+            const amounts = line.match(amountRegex);
             
-            let description = line.replace(dateMatch[0], '').trim();
-            // ลบตัวเลขออกจากคำอธิบายเบื้องต้น
-            if (numbers) {
-                numbers.forEach(num => {
-                    description = description.replace(num, '');
-                });
-            }
-            description = description.replace(/\s+/g, ' ').trim(); // จัดช่องว่าง
-
-            // สมมติว่าตัวเลขสุดท้ายคือยอดคงเหลือ (Balance)
-            let balance = numbers ? numbers[numbers.length - 1] : '';
-            let transactionAmount = numbers && numbers.length > 1 ? numbers[numbers.length - 2] : '';
-            
-            // แยกฝาก/ถอน (อย่างง่าย: ถ้าไม่มีเครื่องหมายลบ ถือว่าเป็นการเคลื่อนไหวทั่วไป)
-            // ส่วนใหญ่ต้องดูคำว่า "Deposit", "Transfer", "-" เป็นต้น
             let deposit = '';
             let withdrawal = '';
+            let balance = '';
+            
+            // ลอกเอาวันที่ออกเพื่อหาชื่อบัญชี/รายการ
+            let description = line.replace(dateMatch[0], '').trim();
+            // ลบตัวเลขและเครื่องหมายวรรคตอนออกจากคำอธิบายคร่าวๆ (ปรับตามความเหมาะสม)
+            description = description.replace(/[\d,.]/g, '').trim();
 
-            if (transactionAmount) {
-                // Logic อย่างง่าย: ถ้าบรรทัดมีคำว่า Transfer out หรือ Withdraw ให้ใส่ช่องถอน
-                if (line.toLowerCase().includes('transfer') || line.toLowerCase().includes('withdraw') || line.includes('-')) {
-                    withdrawal = transactionAmount;
-                } else {
-                    deposit = transactionAmount;
+            if (amounts && amounts.length > 0) {
+                // สมมติว่าตัวเลขสุดท้ายคือยอดคงเหลือ (Balance)
+                balance = amounts[amounts.length - 1];
+                
+                // ถ้ามีตัวเลข 2 ตัวขึ้นไป ตัวแรกมักจะเป็น เงินเข้า/ออก
+                if (amounts.length >= 2) {
+                    // ต้องวิเคราะห์เพิ่มว่าตัวไหนคือ Deposit หรือ Withdrawal 
+                    // ในกรณีง่ายๆ อาจถือว่าตัวแรกคือ Transaction Amount
+                    // *หมายเหตุ:* การแยก Deposit/Withdrawal แบบเป๊ะๆ โดยไม่มี Keyword (เช่น "CR", "DR") 
+                    //是做ยากด้วย Regex อย่างเดียว อาจจะต้องดูบริบทหรือตำแหน่งคอลัมน์
+                    // ตรงนี้สมมติว่าตัวแรกคือรายการที่เกิดขึ้น
+                    withdrawal = amounts[0]; 
                 }
             }
 
-            results.push({
-                date: dateMatch[0],
-                description: description,
-                deposit: deposit,
-                withdrawal: withdrawal,
-                balance: balance
-            });
+            // กรองแถวที่ไม่ใช่ข้อมูลธุรกรรม (เช่น หัวตาราง, โฆษณา)
+            if (description.length > 2 || amounts) {
+                results.push({
+                    date: dateMatch[0],
+                    description: description || '-',
+                    deposit: deposit,
+                    withdrawal: withdrawal,
+                    balance: balance
+                });
+            }
         }
     });
 
@@ -133,7 +149,11 @@ function parseBankStatement(lines) {
 }
 
 function renderTable(data) {
-    if (data.length === 0) return;
+    if (data.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;">ไม่พบข้อมูลธุรกรรม (ลองตรวจสอบไฟล์ PDF)</td></tr>';
+        return;
+    }
+    
     data.forEach(row => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
@@ -141,7 +161,7 @@ function renderTable(data) {
             <td>${row.description}</td>
             <td style="color:green">${row.deposit}</td>
             <td style="color:red">${row.withdrawal}</td>
-            <td><b>${row.balance}</b></td>
+            <td><strong>${row.balance}</strong></td>
         `;
         tableBody.appendChild(tr);
     });
@@ -151,8 +171,19 @@ downloadBtn.addEventListener('click', () => {
     if (extractedData.length === 0) return;
 
     const ws = XLSX.utils.json_to_sheet(extractedData);
+    
+    // ปรับความกว้างคอลัมน์ใน Excel
+    const wscols = [
+        {wch: 15}, // Date
+        {wch: 40}, // Description
+        {wch: 15}, // Deposit
+        {wch: 15}, // Withdrawal
+        {wch: 15}  // Balance
+    ];
+    ws['!cols'] = wscols;
+
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Statement");
+    XLSX.utils.book_append_sheet(wb, ws, "Bank Statement");
 
     XLSX.writeFile(wb, "Bank_Statement_Result.xlsx");
 });
