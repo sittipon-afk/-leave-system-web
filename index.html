@@ -1,44 +1,57 @@
 <!DOCTYPE html>
 <html lang="th">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8"> <!-- สำคัญมากสำหรับภาษาไทย -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OCR ใบแจ้งยอดธนาคาร (PDF to Excel)</title>
-    
-    <!-- โหลด Library ที่จำเป็น -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <title>Bank Statement OCR (PDF/Image) to Excel</title>
+    <!-- โหลด Library -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
-
+    <!-- ถ้าจะอ่าน PDF ต้องเพิ่ม pdf.js ด้วย (ดูหมายเหตุด้านล่าง) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    
     <style>
         body { font-family: 'Sarabun', sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-        .container { border: 1px solid #ddd; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        #preview-container { margin-top: 15px; display: flex; flex-wrap: wrap; gap: 10px; }
-        .page-preview { border: 1px solid #ccc; max-width: 200px; display: none; }
-        
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        #preview { max-width: 100%; margin-top: 10px; display: none; border: 1px solid #eee; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 0.9rem; }
         th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f4f4f4; }
-        
-        button { padding: 10px 20px; background: #28a745; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 1rem; margin-top: 15px; }
+        th { background-color: #f2f2f2; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; margin-top: 10px; border-radius: 4px; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        button#downloadBtn { background: #007bff; }
+        .status { margin-top: 10px; color: #555; font-weight: bold; }
         
-        .status { margin-top: 10px; padding: 10px; background: #e9ecef; border-radius: 4px; color: #333; white-space: pre-wrap; }
-        .error { color: red; }
+        /* Style สำหรับ Raw Text Box */
+        #rawTextOutput {
+            margin-top: 20px;
+            padding: 15px;
+            background: #2d2d2d;
+            color: #00ff00;
+            border: 1px solid #444;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none; /* ซ่อนไว้ก่อน จนกว่าจะกดปุ่ม */
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
-    <h1>แปลงใบแจ้งยอดธนาคาร (PDF) เป็น Excel</h1>
-    <p>รองรับไฟล์ PDF ภาษาไทย (ระบบประมวลผลในเบราว์เซอร์ของคุณ 100%)</p>
+    <h1>แปลงใบแจ้งยอดธนาคาร (OCR) เป็น Excel</h1>
+    <p>รองรับไฟล์รูปภาพ (JPG, PNG) และ PDF (ต้องมีระบบแปลง PDF เป็นรูปใน JS)</p>
     
     <div class="container">
-        <input type="file" id="uploader" accept="application/pdf">
-        <div id="status" class="status">รออัปโหลดไฟล์...</div>
+        <!-- เปลี่ยน accept ให้รองรับ pdf ด้วย -->
+        <input type="file" id="uploader" accept="image/*, application/pdf">
+        <br>
+        <!-- ใช้ canvas สำหรับแสดงหน้า PDF แทน img ถ้าเป็นไฟล์ PDF -->
+        <canvas id="previewCanvas" style="max-width: 100%; display: none; margin-top: 10px; border: 1px solid #eee;"></canvas>
+        <img id="preview" alt="Preview">
         
-        <div id="preview-container"></div>
-        
-        <button id="downloadBtn" disabled>ดาวน์โหลดไฟล์ Excel</button>
+        <div id="status" class="status"></div>
+        <button id="downloadBtn" disabled>ดาวน์โหลด Excel</button>
     </div>
 
     <table id="resultTable">
@@ -53,6 +66,9 @@
         </thead>
         <tbody></tbody>
     </table>
+
+    <!-- กล่องแสดง Raw Text -->
+    <div id="rawTextOutput"></div>
 
     <script src="script.js"></script>
 </body>
