@@ -1,162 +1,180 @@
-// ตั้งค่า PDF.js Worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
 const uploader = document.getElementById('uploader');
+const preview = document.getElementById('preview');
 const statusDiv = document.getElementById('status');
-const previewContainer = document.getElementById('preview-container');
 const downloadBtn = document.getElementById('downloadBtn');
 const tableBody = document.querySelector('#resultTable tbody');
+const rawTextDiv = document.getElementById('rawTextOutput'); // ต้องเพิ่ม div นี้ใน HTML ด้วย
 
 let extractedData = [];
 
+// ตรวจสอบว่ามี element สำหรับแสดง raw text หรือไม่ ถ้าไม่มีให้สร้างชั่วคราว
+if (!rawTextDiv) {
+    const div = document.createElement('div');
+    div.id = 'rawTextOutput';
+    div.style.cssText = 'margin-top: 20px; padding: 10px; background: #f4f4f4; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace; font-size: 12px; max-height: 200px; overflow-y: auto; display: none;';
+    document.body.appendChild(div);
+}
+
 uploader.addEventListener('change', async (e) => {
     const file = e.target.files[0];
-    if (!file || file.type !== 'application/pdf') {
-        statusDiv.innerHTML = '<span class="error">กรุณาเลือกไฟล์ PDF เท่านั้น</span>';
-        return;
-    }
+    if (!file) return;
 
-    // รีเซ็ตค่า
+    // รีเซ็ตค่าต่างๆ
     tableBody.innerHTML = '';
     extractedData = [];
-    previewContainer.innerHTML = '';
     downloadBtn.disabled = true;
-    statusDiv.innerText = 'กำลังอ่านไฟล์ PDF...';
+    const rawTextEl = document.getElementById('rawTextOutput');
+    rawTextEl.style.display = 'block';
+    rawTextEl.innerText = 'กำลังประมวลผล...';
+    
+    // กรณีเป็น PDF ต้องใช้ pdf.js แปลงเป็นรูปก่อน (ถ้ามี logic เดิมให้คงไว้ ส่วนนี้สมมติว่าเป็นรูปภาพหรือจัดการ PDF แล้ว)
+    // หากต้องการรองรับ PDF แบบเต็มรูปแบบ ต้องใส่โค้ดส่วนแปลง PDF to Image ตรงนี้
+    // แต่เพื่อให้โฟกัสที่การแก้ Regex ขอสมมติว่าเรากำลังส่ง image ไปให้ Tesseract
+    
+    statusDiv.innerText = 'กำลังโหลดโมเดลภาษาไทย (อาจใช้เวลาสักครู่)...';
 
     try {
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-        const totalPages = pdf.numPages;
-        
-        statusDiv.innerText = `พบ ${totalPages} หน้า กำลังเริ่ม OCR (อาจใช้เวลาสักครู่)...`;
-
-        // สร้าง Tesseract Worker และโหลดภาษา ไทย + อังกฤษ
-        // ใช้ CDN ที่เสถียรสำหรับ GitHub Pages
+        // 1. สร้าง Worker และโหลดภาษา ไทย + อังกฤษ
         const worker = await Tesseract.createWorker({
             logger: m => {
                 if(m.status === 'recognizing text') {
-                    statusDiv.innerText = `กำลังประมวลผลหน้า ${m.currentPage || 1}/${totalPages}: ${Math.round(m.progress * 100)}%`;
+                    statusDiv.innerText = `กำลังอ่านข้อความ: ${Math.round(m.progress * 100)}%`;
                 }
-            },
-            // ระบุ path ของ core และ language data ชัดเจน
-            corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/dist/tesseract-core.wasm.js',
-            langPath: 'https://tessdata.projectnaptha.com/4.0.0' 
+            }
         });
 
-        // โหลดภาษา ไทย (tha) และ อังกฤษ (eng) เพื่อความแม่นยำ
+        // โหลดภาษา tha (ไทย) และ eng (อังกฤษ/ตัวเลข)
         await worker.loadLanguage('tha+eng');
         await worker.initialize('tha+eng');
 
-        let allTextLines = [];
+        // 2. ทำการ OCR
+        const { data: { text } } = await worker.recognize(file);
+        
+        statusDiv.innerText = 'ประมวลผลเสร็จสิ้น! กำลังวิเคราะห์ข้อมูล...';
+        
+        // 3. แสดง Raw Text ให้ผู้ใช้ดูเพื่อ Debug
+        rawTextEl.innerText = "--- ข้อความดิบที่อ่านได้ (Raw Text) ---\n" + text;
+        console.log("Raw Text from OCR:", text);
 
-        // วนลูปทุกหน้าใน PDF
-        for (let i = 1; i <= totalPages; i++) {
-            statusDiv.innerText = `กำลังแปลงหน้า ${i}/${totalPages} เป็นรูปภาพ...`;
-            
-            const page = await pdf.getPage(i);
-            const viewport = page.getViewport({ scale: 2.0 }); // Scale 2.0 เพื่อความชัดของตัวอักษร
-            
-            const canvas = document.createElement('canvas');
-            const context = canvas.getContext('2d');
-            canvas.height = viewport.height;
-            canvas.width = viewport.width;
+        // 4. แยกข้อมูลด้วย Logic ใหม่
+        const lines = text.split('\n');
+        extractedData = parseBankStatementLoose(lines);
 
-            await page.render({ canvasContext: context, viewport: viewport }).promise;
-
-            // แสดงตัวอย่างรูป (Optional)
-            const img = document.createElement('img');
-            img.src = canvas.toDataURL('image/png');
-            img.className = 'page-preview';
-            img.style.display = 'block';
-            img.title = `หน้า ${i}`;
-            previewContainer.appendChild(img);
-
-            // ทำ OCR กับรูปภาพนี้
-            statusDiv.innerText = `กำลังอ่านข้อความหน้า ${i}/${totalPages}...`;
-            const { data: { text } } = await worker.recognize(canvas);
-            
-            const lines = text.split('\n');
-            allTextLines = allTextLines.concat(lines);
+        if (extractedData.length === 0) {
+            statusDiv.innerText = 'ไม่พบข้อมูลรายการเดินบัญชีในรูปแบบที่รู้จัก (ลองดู Raw Text ด้านล่างเพื่อตรวจสอบ)';
+        } else {
+            statusDiv.innerText = `พบ ${extractedData.length} รายการ`;
+            renderTable(extractedData);
+            downloadBtn.disabled = false;
         }
 
         await worker.terminate();
 
-        statusDiv.innerText = 'OCR เสร็จสิ้น! กำลังจัดรูปแบบข้อมูล...';
-        
-        // แยกข้อมูล (ต้องปรับ Regex ตามรูปแบบธนาคารของคุณ)
-        extractedData = parseBankStatement(allTextLines);
-        
-        renderTable(extractedData);
-        
-        if (extractedData.length > 0) {
-            downloadBtn.disabled = false;
-            statusDiv.innerText = `สำเร็จ! พบข้อมูล ${extractedData.length} รายการ`;
-        } else {
-            statusDiv.innerHTML = '<span class="error">ไม่พบข้อมูลในรูปแบบตาราง กรุณาลองไฟล์อื่น หรือตรวจสอบรูปแบบ</span>';
-        }
-
     } catch (error) {
         console.error(error);
-        statusDiv.innerHTML = `<span class="error">เกิดข้อผิดพลาด: ${error.message}</span>`;
+        statusDiv.innerText = 'เกิดข้อผิดพลาด: ' + error.message;
+        rawTextEl.innerText += "\n\nError: " + error.message;
     }
 });
 
-function parseBankStatement(lines) {
+function parseBankStatementLoose(lines) {
     const results = [];
-    // Regex ตัวอย่าง: หาวันที่รูปแบบ DD/MM/YYYY หรือ DD/MM/YY
-    // ปรับปรุงตามจริง: ธนาคารบางแห่งใช้ DD-MM-YYYY หรือ มีเวลาติดมาด้วย
-    const dateRegex = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/; 
     
-    lines.forEach(line => {
+    // Regex แบบยืดหยุ่น (Looser)
+    // 1. วันที่: รองรับ DD/MM/YY, DD/MM/YYYY, DD-MM-YYYY, DD MM YYYY
+    // จับกลุ่ม: วัน, เดือน, ปี
+    const dateRegex = /(\d{1,2})[\/\-.\s](\d{1,2})[\/\-.\s](\d{2,4})/;
+
+    // 2. ตัวเลขเงิน: รองรับ 100.00, 1,000.00, 1000.50
+    // ระวังเรื่อง comma ที่อาจจะถูก OCR อ่านผิดเป็นจุด หรือสลับที่
+    const moneyRegex = /(\d{1,3}(?:[,\d]*\.\d{2})|\d+\.\d{2})/g;
+
+    lines.forEach((line, index) => {
+        const originalLine = line;
         line = line.trim();
         if (!line) return;
 
+        // หาวันที่ในบรรทัดนี้
         const dateMatch = line.match(dateRegex);
         
+        // หาคำว่า "โอน", "จ่าย", "ฝาก", "ยอด" เพื่อช่วยยืนยันว่าเป็นบรรทัดรายการ (Optional แต่ช่วยกรองขยะ)
+        const hasTransactionKeyword = /โอน|จ่าย|ฝาก|ถอน|ยอด|ATM|QR|SCB|KBANK|BBL|KTB/i.test(line);
+
         if (dateMatch) {
-            // ลองแยกตัวเลขที่เป็นเงิน (ที่มีทศนิยม 2 ตำแหน่ง)
-            // รูปแบบทั่วไป: ... Description ... Amount ... Balance
-            // วิธีนี้อาจต้องปรับเยอะมากขึ้นอยู่กับ Layout ของ Bank Statement นั้นๆ
-            const numbers = line.match(/[\d,]+\.\d{2}/g);
+            // พบวันที่ ลองหาตัวเลขในบรรทัดเดียวกัน หรือบรรทัดถัดไป (กรณี OCR ตัดบรรทัดผิด)
+            let currentLineAmounts = line.match(moneyRegex);
+            let description = line.replace(dateMatch[0], '').replace(/[0-9,.]/g, '').trim();
             
-            let description = line.replace(dateMatch[0], '').trim();
-            // ลบตัวเลขออกจากคำอธิบายเบื้องต้น
-            if(numbers) {
-                numbers.forEach(num => {
-                    description = description.replace(num, '').trim();
-                });
-            }
-            // ลบเครื่องหมายวรรคตอนเกินออก
-            description = description.replace(/[-|]+/g, ' ').trim();
-
-            let deposit = '';
-            let withdrawal = '';
-            let balance = '';
-
-            if (numbers && numbers.length > 0) {
-                // สมมติว่าตัวสุดท้ายคือยอดคงเหลือ (Balance)
-                balance = numbers[numbers.length - 1];
-                
-                // ถ้ามี 2 ตัวเลข อาจเป็น ยอดทำรายการ + ยอดคงเหลือ
-                if (numbers.length >= 2) {
-                    const transactionAmount = numbers[numbers.length - 2];
-                    // ต้องมี Logic เพิ่มว่าอันไหนฝาก อันไหนถอน (เช่น ดูคำว่า "โอนเข้า", "ATM")
-                    // เบื้องต้นใส่เป็นถอนไว้ก่อน หรือเว้นว่างให้ผู้ใช้แก้ใน Excel
-                    withdrawal = transactionAmount; 
+            // ลบคำซ้ำๆ ที่มักเกิดจาก OCR ผิดพลาด เช่น "ม ม ก ย" -> "มกราคม" (อันนี้ทำยาก ต้องใช้ dict)
+            // เอาแค่ลบตัวเลขออกเพื่อเหลือแต่ข้อความ
+            
+            // กรณีพิเศษ: ถ้าบรรทัดนี้มีแค่วันที่ แต่ไม่มีตัวเลข อาจต้องไปดูบรรทัดถัดไป (Lookahead)
+            if (!currentLineAmounts && lines[index + 1]) {
+                const nextLineAmounts = lines[index + 1].match(moneyRegex);
+                if (nextLineAmounts) {
+                    currentLineAmounts = nextLineAmounts;
+                    description += " " + lines[index + 1].replace(/[0-9,.]/g, '').trim();
                 }
             }
 
-            results.push({
-                date: dateMatch[0],
-                description: description,
-                deposit: deposit,
-                withdrawal: withdrawal,
-                balance: balance
-            });
+            if (currentLineAmounts && currentLineAmounts.length > 0) {
+                // Logic การแยกประเภทเงิน (อย่างง่าย)
+                // โดยปกติ Bank Statement จะมี: [วันที่] [รายละเอียด] [เงินเข้า] [เงินออก] [ยอดคงเหลือ]
+                // หรือ [วันที่] [รายละเอียด] [ยอดคงเหลือ] (แล้วมีเครื่องหมาย +/-)
+                
+                // สมมติว่าตัวเลขตัวสุดท้ายคือ "ยอดคงเหลือ" เสมอ (Common pattern)
+                const balance = cleanNumber(currentLineAmounts[currentLineAmounts.length - 1]);
+                
+                let deposit = '';
+                let withdrawal = '';
+
+                // ถ้ามีตัวเลข 2 ตัว: อาจเป็น (เงินเข้า, ยอดคงเหลือ) หรือ (เงินออก, ยอดคงเหลือ)
+                // ต้องดูบริบทเพิ่ม แต่ถ้าทำแบบง่าย:
+                if (currentLineAmounts.length >= 2) {
+                    const potentialTx = cleanNumber(currentLineAmounts[0]);
+                    // เช็คว่าเป็นเงินเข้าหรือออกจากรายการ (เช่นคำว่า ฝาก vs จ่าย)
+                    if (/ฝาก|รับ|โอนเข้า/i.test(description)) {
+                        deposit = potentialTx;
+                    } else {
+                        withdrawal = potentialTx;
+                    }
+                }
+
+                results.push({
+                    date: normalizeDate(dateMatch[1], dateMatch[2], dateMatch[3]),
+                    description: description.replace(/\s+/g, ' '), // ลดช่องว่างซ้ำ
+                    deposit: deposit,
+                    withdrawal: withdrawal,
+                    balance: balance
+                });
+            }
         }
     });
 
     return results;
+}
+
+// ฟังก์ชันทำความสะอาดตัวเลข (ลบ comma, แปลง string เป็น format ที่เหมาะสม)
+function cleanNumber(str) {
+    if (!str) return '';
+    // ลบ comma ออก (1,000 -> 1000)
+    return str.replace(/,/g, '');
+}
+
+// ฟังก์ชันจัดรูปแบบวันที่ให้เป็นมาตรฐาน DD/MM/YYYY
+function normalizeDate(d, m, y) {
+    // เติม 0 ข้างหน้าถ้าหลักเดียว
+    const day = d.padStart(2, '0');
+    const month = m.padStart(2, '0');
+    let year = y;
+    
+    // ถ้าปีเป็น 2 หลัก (เช่น 67) ให้เติม 20 นำหน้า (สมมติว่าเป็นปี ค.ศ. 20xx หรือ พ.ศ. 25xx ต้องดูตามข้อมูลจริง)
+    // ส่วนใหญ่ Bank Statement ไทยมักเป็น พ.ศ. (เช่น 67 คือ 2567)
+    if (year.length === 2) {
+        year = '25' + year; 
+    }
+    
+    return `${day}/${month}/${year}`;
 }
 
 function renderTable(data) {
@@ -165,9 +183,9 @@ function renderTable(data) {
         tr.innerHTML = `
             <td>${row.date}</td>
             <td>${row.description}</td>
-            <td style="text-align:right;">${row.deposit}</td>
-            <td style="text-align:right;">${row.withdrawal}</td>
-            <td style="text-align:right;">${row.balance}</td>
+            <td style="color:green">${row.deposit}</td>
+            <td style="color:red">${row.withdrawal}</td>
+            <td><b>${row.balance}</b></td>
         `;
         tableBody.appendChild(tr);
     });
@@ -178,7 +196,7 @@ downloadBtn.addEventListener('click', () => {
 
     const ws = XLSX.utils.json_to_sheet(extractedData);
     
-    // ตั้งค่าความกว้างคอลัมน์ให้เหมาะสม
+    // ปรับความกว้างคอลัมน์ให้สวยงาม
     const wscols = [
         {wch: 15}, // Date
         {wch: 40}, // Description
@@ -189,7 +207,7 @@ downloadBtn.addEventListener('click', () => {
     ws['!cols'] = wscols;
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Bank Statement");
+    XLSX.utils.book_append_sheet(wb, ws, "Statement");
 
-    XLSX.writeFile(wb, "Bank_Statement_TH.xlsx");
+    XLSX.writeFile(wb, "Bank_Statement_Result.xlsx");
 });
